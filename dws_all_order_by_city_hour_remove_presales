@@ -1,0 +1,162 @@
+SELECT
+		md5(CONCAT(DATE_FORMAT(g.suborder_pay_time, '%Y%m%d%H'),o.dim_pub_shop_id,nvl(o.receiver_province,''),nvl(o.receiver_city,''))) AS dwid
+		,DATE_FORMAT(g.suborder_pay_time, '%Y%m%d%H') AS sum_hour_dt
+		,DATE_FORMAT(g.suborder_pay_time, '%Y-%m-%d %H') AS sum_hour
+		,g.dim_pub_shop_id
+		,o.dim_pub_plat_id
+		,o.receiver_province
+		,o.receiver_city
+	,COUNT(DISTINCT o.order_no ) AS parent_order_pay_num
+	,COUNT(DISTINCT IF(o.consign_time IS NULL AND o.order_status = 'TRADE_CLOSED', o.order_no, NULL)) AS parent_order_cancel_num
+	,COUNT(DISTINCT IF(o.consign_time IS NOT NULL AND o.order_status != 'SELLER_CONSIGNED_PART', o.order_no, NULL ))AS parent_order_send_num
+	,COUNT(DISTINCT IF((o.consign_time IS NULL AND o.order_status = 'WAIT_SELLER_SEND_GOODS') OR (o.consign_time IS NOT NULL AND o.order_status = 'SELLER_CONSIGNED_PART'), o.order_no, NULL)) AS parent_wait_out_stock_num
+	,COUNT(DISTINCT g.sub_order_no ) AS order_pay_num
+	,COUNT(DISTINCT IF(g.suborder_consign_time IS NULL AND g.sub_order_status = 'TRADE_CLOSED', g.sub_order_no, NULL)) AS order_cancel_num
+	,COUNT(DISTINCT IF(g.suborder_consign_time IS NOT NULL , g.sub_order_no, NULL ))AS order_send_num
+	,COUNT(DISTINCT IF((g.suborder_consign_time IS NULL AND g.sub_order_status = 'WAIT_SELLER_SEND_GOODS'), g.sub_order_no, NULL)) AS wait_out_stock_num
+	,COUNT(DISTINCT IF(g.suborder_consign_time IS NOT NULL AND r.has_good_return = 1 AND r.refund_status = 'SUCCESS', r.sub_order_no, NULL )) AS return_num
+	,now()                                                   as ads_create_time
+    ,'DWD_ETL'                                                as ads_create_name
+    ,now()                                                   as ads_update_time
+    ,'DWD_ETL'                                                as ads_update_name
+    ,'0'                                          as dw_del_flag
+FROM (
+	SELECT DATE_FORMAT(suborder_pay_time, '%Y%m%d%H') AS pay_time_dt
+		,dim_pub_shop_id
+	FROM dwd.dwd_tb_trade_order_detail
+	WHERE dw_update_time >= "${bizDate}"
+		AND suborder_pay_time IS NOT NULL
+	GROUP BY pay_time_dt
+		,dim_pub_shop_id
+	) pay_dt
+LEFT JOIN 
+	dwd.dwd_tb_trade_order o ON
+	pay_dt.pay_time_dt=DATE_FORMAT(o.trade_pay_time, '%Y%m%d%H')
+	AND pay_dt.dim_pub_shop_id = o.dim_pub_shop_id
+LEFT JOIN dwd.dwd_tb_trade_order_detail g ON
+	o.dim_pub_shop_id = g.dim_pub_shop_id
+	AND o.order_no = g.order_no
+LEFT JOIN dim.dim_pub_shop bs ON
+	g.dim_pub_shop_id = bs.dim_pub_shop_id
+LEFT JOIN dwd.dwd_tb_trade_refund_order_detail r ON
+	g.dim_pub_shop_id = r.dim_pub_shop_id
+	AND g.sub_order_no = r.sub_order_no
+WHERE
+	 g.suborder_pay_time >= bs.bi_service_start
+	AND g.suborder_pay_time < date_sub(bs.bi_service_end, interval -1 day)
+	AND IF( o.order_type = 2,
+	o.order_step_trade_status = "FRONT_PAID_FINAL_PAID"
+		OR ( o.order_step_trade_status =
+		"FRONT_NOPAID_FINAL_NOPAID"
+			AND o.available_confirm_amt = 0 ),
+		1 = 1 )
+GROUP BY
+		g.dim_pub_shop_id,
+	sum_hour_dt,sum_hour,
+	o.receiver_province,
+	o.receiver_city,
+	o.dim_pub_plat_id
+union all
+
+SELECT
+	md5(CONCAT(sum_hour_dt,dim_pub_shop_id,nvl(receiver_province,''),nvl(receiver_city,''))) AS dwid
+	,sum_hour_dt
+	,sum_hour
+	,dim_pub_shop_id
+	,dim_pub_plat_id
+	,receiver_province
+	,receiver_city
+	,sum(parent_order_pay_num)
+	,sum(parent_order_cancel_num)
+	,sum(parent_order_send_num)
+	,sum(parent_wait_out_stock_num)
+	,sum(order_pay_num)
+	,sum(order_cancel_num)
+	,sum(order_send_num)
+	,sum(wait_out_stock_num)
+	,'' as return_num
+	,now()                                                   as ads_create_time
+	,'DWD_ETL'                                                as ads_create_name
+	,now()                                                   as ads_update_time
+	,'DWD_ETL'                                                as ads_update_name
+	,'0'                                          			as dw_del_flag
+FROM (SELECT
+		DATE_FORMAT(g.trade_pay_time, '%Y%m%d%H') AS sum_hour_dt
+		,DATE_FORMAT(g.trade_pay_time, '%Y-%m-%d %H') AS sum_hour
+		,o.dim_pub_shop_id
+		,o.dim_pub_plat_id
+		,o.buyer_province as receiver_province
+		,o.buyer_city as receiver_city
+		,count(distinct g.order_no) as parent_order_pay_num
+		,count(DISTINCT IF(o.order_status in ("TRADE_CANCELED","LOCKED"),g.order_no,NULL)) AS parent_order_cancel_num
+		,count(DISTINCT IF(o.order_status in ("WAIT_GOODS_RECEIVE_CONFIRM","FINISHED_L"),g.order_no,NULL)) AS parent_order_send_num
+		,count(DISTINCT IF(o.order_status in ("WAIT_SELLER_STOCK_OUT","WAIT_SELLER_DELIVERY"),g.order_no,NULL)) AS parent_wait_out_stock_num
+		,count(g.order_detail_no) AS order_pay_num
+		,count(IF(o.order_status in ("TRADE_CANCELED","LOCKED"),g.order_detail_no,NULL)) AS order_cancel_num
+		,count(IF(o.order_status in ("WAIT_GOODS_RECEIVE_CONFIRM","FINISHED_L"),g.order_detail_no,NULL)) AS order_send_num
+		,count(IF(o.order_status in ("WAIT_SELLER_STOCK_OUT","WAIT_SELLER_DELIVERY"),g.order_detail_no,NULL)) AS wait_out_stock_num
+
+FROM (	SELECT DATE_FORMAT(trade_pay_time, '%Y%m%d%H') AS pay_time_dt
+		,dim_pub_shop_id
+	FROM dwd.dwd_jd_trade_order_detail
+	WHERE dw_update_time >= "${bizDate}"
+		AND trade_pay_time IS NOT NULL
+	GROUP BY pay_time_dt
+		,dim_pub_shop_id) jd_pay_dt
+LEFT JOIN 
+		dwd.dwd_jd_trade_order o
+ON jd_pay_dt.pay_time_dt=o.DATE_FORMAT(o.trade_pay_time, '%Y%m%d%H')
+and jd_pay_dt.dim_pub_shop_id=o.dim_pub_shop_id
+LEFT JOIN dwd.dwd_jd_trade_order_detail  g ON o.dim_pub_shop_id = g.dim_pub_shop_id AND o.order_no = g.order_no
+LEFT JOIN dim.dim_pub_shop shop ON o.dim_pub_shop_id = shop.dim_pub_shop_id
+WHERE
+		o.trade_pay_time >= shop.bi_service_start
+		AND o.trade_pay_time < date_sub(shop.bi_service_end,interval -1 day)
+		AND !(o.pay_type = "1-货到付款" AND o.order_status = 'FINISHED_L')
+GROUP BY
+		o.dim_pub_shop_id,sum_hour_dt,sum_hour
+		,o.buyer_province,
+		o.buyer_city
+UNION ALL
+SELECT
+		DATE_FORMAT(o.trade_end_time, '%Y%m%d%H') AS sum_hour_dt
+		,DATE_FORMAT(o.trade_end_time,'%Y-%m-%d %H') AS sum_hour
+		,o.dim_pub_shop_id as shopCode
+		,o.buyer_province
+		,o.buyer_city
+		,o.dim_pub_plat_id
+		,count(distinct g.order_no) as parent_order_pay_num
+		,0 AS parent_order_cancel_num
+		,count(distinct g.order_no) AS parent_order_send_num
+		,0 AS parent_wait_out_stock_num
+		,count(g.order_detail_no) AS order_pay_num
+		,0 AS order_cancel_num
+		,count(g.order_detail_no) AS order_send_num
+		,0 AS wait_out_stock_num
+FROM (	SELECT DATE_FORMAT(trade_end_time, '%Y%m%d%H') AS end_time_dt
+		,dim_pub_shop_id
+	FROM dwd.dwd_jd_trade_order_detail
+	WHERE dw_update_time >= "${bizDate}"
+		AND trade_end_time IS NOT NULL
+	GROUP BY end_time_dt
+		,dim_pub_shop_id) jd_pay_dt
+LEFT JOIN 
+		dwd.dwd_jd_trade_order o
+ON jd_pay_dt.end_time_dt=o.DATE_FORMAT(o.trade_end_time, '%Y%m%d%H')
+and jd_pay_dt.dim_pub_shop_id=o.dim_pub_shop_id
+		LEFT JOIN dwd.dwd_jd_trade_order_detail  g ON o.dim_pub_shop_id = g.dim_pub_shop_id AND o.order_no = g.order_no
+		LEFT JOIN dim.dim_pub_shop shop ON o.dim_pub_shop_id = shop.dim_pub_shop_id
+WHERE
+		o.order_status = 'FINISHED_L'
+		AND o.pay_type = "1-货到付款"
+		AND o.trade_end_time >= shop.bi_service_start
+		AND o.trade_end_time < date_sub(shop.bi_service_end,interval -1 day)
+GROUP BY o.dim_pub_shop_id,sum_hour_dt,sum_hour,o.buyer_province,o.buyer_city
+)
+where md5(CONCAT(sum_hour_dt,dim_pub_shop_id,nvl(receiver_province,''),nvl(receiver_city,''))) is not null
+group by sum_hour_dt,
+	sum_hour,
+	dim_pub_shop_id,
+	dim_pub_plat_id,
+	receiver_province,
+	receiver_city;
